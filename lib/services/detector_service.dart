@@ -17,7 +17,7 @@ class PrototypeDetectionEngine implements DetectionEngine {
     required ScanTarget target,
     required ModelMetadata metadata,
   }) async {
-    await Future<void>.delayed(const Duration(milliseconds: 850));
+    await Future<void>.delayed(const Duration(milliseconds: 1800));
 
     final score = _prototypeRiskScore(target);
     final label = score >= 0.5 ? DetectionLabel.malware : DetectionLabel.benign;
@@ -59,6 +59,17 @@ class PrototypeDetectionEngine implements DetectionEngine {
       score += 0.05;
     } else if (target.sizeBytes > 0 && target.sizeBytes < 3 * 1024 * 1024) {
       score -= 0.06;
+    }
+
+    if (target.source == ScanSource.installedApp) {
+      score += name.contains('system') ? -0.04 : 0.03;
+    } else if (target.source == ScanSource.observedBehavior) {
+      final matches = RegExp(
+        r'\d+',
+      ).allMatches(target.packageName ?? '').toList(growable: false);
+      final sensitiveSignals = matches.isEmpty ? null : matches.last.group(0);
+      final signalCount = int.tryParse(sensitiveSignals ?? '0') ?? 0;
+      score += (signalCount / 500).clamp(0.0, 0.22);
     }
 
     return score.clamp(0.04, 0.96);

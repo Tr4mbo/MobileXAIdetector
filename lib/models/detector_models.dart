@@ -1,5 +1,7 @@
 enum DetectionLabel { benign, malware }
 
+enum ScanSource { apkFile, installedApp, observedBehavior }
+
 extension DetectionLabelText on DetectionLabel {
   String get displayName => switch (this) {
     DetectionLabel.benign => 'Benign',
@@ -51,11 +53,25 @@ class ModelMetadata {
 }
 
 class ScanTarget {
-  const ScanTarget({required this.name, required this.sizeBytes, this.path});
+  const ScanTarget({
+    required this.name,
+    required this.sizeBytes,
+    this.path,
+    this.packageName,
+    this.source = ScanSource.apkFile,
+  });
 
   final String name;
   final int sizeBytes;
   final String? path;
+  final String? packageName;
+  final ScanSource source;
+
+  String get sourceLabel => switch (source) {
+    ScanSource.apkFile => 'APK externo',
+    ScanSource.installedApp => 'App instalada',
+    ScanSource.observedBehavior => 'Analisis global',
+  };
 
   String get sizeLabel {
     if (sizeBytes <= 0) {
@@ -69,6 +85,54 @@ class ScanTarget {
       unitIndex++;
     }
     return '${value.toStringAsFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}';
+  }
+}
+
+class InstalledAndroidApp {
+  const InstalledAndroidApp({
+    required this.packageName,
+    required this.label,
+    required this.versionName,
+    required this.versionCode,
+    required this.firstInstallTime,
+    required this.lastUpdateTime,
+    required this.requestedPermissions,
+    this.sourceDir,
+  });
+
+  final String packageName;
+  final String label;
+  final String versionName;
+  final int versionCode;
+  final int firstInstallTime;
+  final int lastUpdateTime;
+  final List<String> requestedPermissions;
+  final String? sourceDir;
+
+  factory InstalledAndroidApp.fromMap(Map<dynamic, dynamic> map) {
+    return InstalledAndroidApp(
+      packageName: map['packageName'] as String? ?? '',
+      label: map['label'] as String? ?? map['packageName'] as String? ?? 'App',
+      versionName: map['versionName'] as String? ?? 'unknown',
+      versionCode: (map['versionCode'] as num?)?.toInt() ?? 0,
+      firstInstallTime: (map['firstInstallTime'] as num?)?.toInt() ?? 0,
+      lastUpdateTime: (map['lastUpdateTime'] as num?)?.toInt() ?? 0,
+      requestedPermissions:
+          (map['requestedPermissions'] as List<dynamic>? ?? const [])
+              .map((value) => value.toString())
+              .toList(growable: false),
+      sourceDir: map['sourceDir'] as String?,
+    );
+  }
+
+  ScanTarget toScanTarget() {
+    return ScanTarget(
+      name: label,
+      sizeBytes: 0,
+      path: sourceDir,
+      packageName: packageName,
+      source: ScanSource.installedApp,
+    );
   }
 }
 

@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import 'models/detector_models.dart';
+import 'services/android_app_scanner_service.dart';
 import 'services/detector_service.dart';
 import 'services/model_asset_repository.dart';
 
@@ -32,10 +33,9 @@ class MobileXAIDetectorApp extends StatelessWidget {
           error: AppColors.danger,
         ),
         textTheme: const TextTheme(
-          headlineLarge: TextStyle(fontWeight: FontWeight.w800, height: 1.0),
-          headlineMedium: TextStyle(fontWeight: FontWeight.w800),
-          titleLarge: TextStyle(fontWeight: FontWeight.w700),
-          titleMedium: TextStyle(fontWeight: FontWeight.w700),
+          headlineMedium: TextStyle(fontWeight: FontWeight.w900),
+          titleLarge: TextStyle(fontWeight: FontWeight.w800),
+          titleMedium: TextStyle(fontWeight: FontWeight.w800),
           bodyMedium: TextStyle(height: 1.35),
         ),
       ),
@@ -43,6 +43,8 @@ class MobileXAIDetectorApp extends StatelessWidget {
     );
   }
 }
+
+enum AppSection { scanner, decision, data, xai, services }
 
 class DetectorScreen extends StatefulWidget {
   const DetectorScreen({super.key});
@@ -54,44 +56,62 @@ class DetectorScreen extends StatefulWidget {
 class _DetectorScreenState extends State<DetectorScreen> {
   final _repository = ModelAssetRepository();
   final _engine = const PrototypeDetectionEngine();
+  final _androidScanner = const AndroidAppScannerService();
 
   late final Future<ModelMetadata> _metadataFuture = _repository.load();
-  ScanTarget? _target;
-  ScanResult? _result;
-  bool _isScanning = false;
+  late final ScanTarget _defaultGlobalTarget = const ScanTarget(
+    name: 'Analisis global del dispositivo',
+    sizeBytes: 0,
+    source: ScanSource.observedBehavior,
+  );
+
+  StreamSubscription<ScanTarget>? _externalApkSubscription;
+  ScanTarget? _globalTarget;
+  ScanResult? _globalResult;
+  ScanTarget? _externalApkTarget;
+  ScanResult? _externalApkResult;
+  List<InstalledAndroidApp> _installedApps = const [];
+  AppSection _section = AppSection.scanner;
+  bool _isGlobalScanning = false;
+  bool _isExternalScanning = false;
+  bool _isNavOpen = false;
   String? _error;
 
-  Future<void> _pickApk() async {
-    final selection = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['apk'],
-      withData: false,
-    );
-
-    if (selection == null || selection.files.isEmpty) {
-      return;
-    }
-
-    final file = selection.files.single;
-    setState(() {
-      _target = ScanTarget(
-        name: file.name,
-        sizeBytes: file.size,
-        path: file.path,
-      );
-      _result = null;
-      _error = null;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _globalTarget = _defaultGlobalTarget;
+    _bootstrapExternalApkHandler();
   }
 
-  Future<void> _runAnalysis(ModelMetadata metadata) async {
-    final target = _target;
-    if (target == null || _isScanning) {
+  @override
+  void dispose() {
+    _externalApkSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _bootstrapExternalApkHandler() async {
+    await _androidScanner.initializeExternalApkListener();
+    _externalApkSubscription = _androidScanner.externalApkStream.listen(
+      _handleExternalApk,
+    );
+
+    final initialApk = await _androidScanner.getInitialExternalApk();
+    if (initialApk != null && mounted) {
+      await _handleExternalApk(initialApk);
+    }
+  }
+
+  Future<void> _handleExternalApk(ScanTarget target) async {
+    final metadata = await _metadataFuture;
+    if (!mounted) {
       return;
     }
 
     setState(() {
-      _isScanning = true;
+      _externalApkTarget = target;
+      _externalApkResult = null;
+      _isExternalScanning = true;
       _error = null;
     });
 
@@ -101,22 +121,111 @@ class _DetectorScreenState extends State<DetectorScreen> {
         return;
       }
       setState(() {
-        _result = result;
+        _externalApkResult = result;
       });
     } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
-        _error = 'No se pudo analizar el archivo: $error';
+        _error = 'No se pudo analizar el APK externo: $error';
       });
     } finally {
       if (mounted) {
         setState(() {
-          _isScanning = false;
+          _isExternalScanning = false;
         });
       }
     }
+  }
+
+  Future<void> _runGlobalAnalysis(ModelMetadata metadata) async {
+    if (_isGlobalScanning) {
+      return;
+    }
+
+    setState(() {
+      _isGlobalScanning = true;
+      _error = null;
+      _section = AppSection.scanner;
+      _isNavOpen = false;
+    });
+
+    try {
+      final apps = await _androidScanner.listInstalledApps();
+      final target = _buildGlobalTarget(apps);
+      final result = await _engine.analyze(target: target, metadata: metadata);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _installedApps = apps;
+        _globalTarget = target;
+        _globalResult = result;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = 'No se pudo completar el analisis global: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGlobalScanning = false;
+        });
+      }
+    }
+  }
+
+  ScanTarget _buildGlobalTarget(List<InstalledAndroidApp> apps) {
+    final sensitiveHits = _countSensitivePermissions(apps);
+    final name = sensitiveHits > 0
+        ? 'Analisis global sms bank risk $sensitiveHits'
+        : 'Analisis global del dispositivo';
+
+    return ScanTarget(
+      name: name,
+      sizeBytes: apps.length,
+      source: ScanSource.observedBehavior,
+      packageName:
+          '${apps.length} apps observadas, $sensitiveHits permisos sensibles',
+    );
+  }
+
+  int _countSensitivePermissions(List<InstalledAndroidApp> apps) {
+    const signals = [
+      'SEND_SMS',
+      'READ_SMS',
+      'RECEIVE_SMS',
+      'READ_CONTACTS',
+      'READ_PHONE_STATE',
+      'CALL_PHONE',
+      'ACCESS_FINE_LOCATION',
+      'RECORD_AUDIO',
+      'CAMERA',
+      'SYSTEM_ALERT_WINDOW',
+      'REQUEST_INSTALL_PACKAGES',
+      'QUERY_ALL_PACKAGES',
+    ];
+
+    var count = 0;
+    for (final app in apps) {
+      for (final permission in app.requestedPermissions) {
+        if (signals.any(permission.contains)) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  void _selectSection(AppSection section) {
+    setState(() {
+      _section = section;
+      _isNavOpen = false;
+    });
   }
 
   @override
@@ -130,17 +239,44 @@ class _DetectorScreenState extends State<DetectorScreen> {
               const Positioned.fill(child: FuturisticBackground()),
               SafeArea(
                 child: snapshot.hasData
-                    ? _LoadedDetectorView(
+                    ? _DetectorShell(
+                        section: _section,
+                        navOpen: _isNavOpen,
                         metadata: snapshot.data!,
-                        target: _target,
-                        result: _result,
+                        globalTarget: _globalTarget ?? _defaultGlobalTarget,
+                        globalResult: _globalResult,
+                        installedApps: _installedApps,
                         error: _error,
-                        isScanning: _isScanning,
-                        onPickApk: _pickApk,
-                        onAnalyze: () => _runAnalysis(snapshot.data!),
+                        isScanning: _isGlobalScanning,
+                        onAnalyze: () => _runGlobalAnalysis(snapshot.data!),
+                        onShieldTap: () {
+                          setState(() {
+                            _isNavOpen = !_isNavOpen;
+                          });
+                        },
+                        onSelectSection: _selectSection,
+                        onOpenUsageAccess:
+                            _androidScanner.openUsageAccessSettings,
                       )
                     : const _LoadingView(),
               ),
+              if (_externalApkTarget != null && snapshot.hasData)
+                Positioned.fill(
+                  child: ExternalApkAnalysisWindow(
+                    metadata: snapshot.data!,
+                    target: _externalApkTarget!,
+                    result: _externalApkResult,
+                    isScanning: _isExternalScanning,
+                    error: _error,
+                    onClose: () {
+                      setState(() {
+                        _externalApkTarget = null;
+                        _externalApkResult = null;
+                        _isExternalScanning = false;
+                      });
+                    },
+                  ),
+                ),
             ],
           );
         },
@@ -149,102 +285,1058 @@ class _DetectorScreenState extends State<DetectorScreen> {
   }
 }
 
-class _LoadedDetectorView extends StatelessWidget {
-  const _LoadedDetectorView({
+class _DetectorShell extends StatelessWidget {
+  const _DetectorShell({
+    required this.section,
+    required this.navOpen,
     required this.metadata,
-    required this.target,
-    required this.result,
+    required this.globalTarget,
+    required this.globalResult,
+    required this.installedApps,
     required this.error,
     required this.isScanning,
-    required this.onPickApk,
     required this.onAnalyze,
+    required this.onShieldTap,
+    required this.onSelectSection,
+    required this.onOpenUsageAccess,
   });
 
+  final AppSection section;
+  final bool navOpen;
   final ModelMetadata metadata;
-  final ScanTarget? target;
-  final ScanResult? result;
+  final ScanTarget globalTarget;
+  final ScanResult? globalResult;
+  final List<InstalledAndroidApp> installedApps;
   final String? error;
   final bool isScanning;
-  final VoidCallback onPickApk;
   final VoidCallback onAnalyze;
+  final VoidCallback onShieldTap;
+  final ValueChanged<AppSection> onSelectSection;
+  final Future<void> Function() onOpenUsageAccess;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final isWide = constraints.maxWidth >= 980;
-        final horizontalPadding = constraints.maxWidth >= 700 ? 28.0 : 16.0;
+        final maxWidth = constraints.maxWidth < 620 ? double.infinity : 470.0;
 
-        return SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(
-            horizontalPadding,
-            18,
-            horizontalPadding,
-            28,
+        return Stack(
+          children: [
+            Center(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxWidth),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      AppHeader(onShieldTap: onShieldTap),
+                      const SizedBox(height: 20),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        child: switch (section) {
+                          AppSection.scanner => ScannerHomeScreen(
+                            key: const ValueKey('scanner'),
+                            metadata: metadata,
+                            target: globalTarget,
+                            result: globalResult,
+                            error: error,
+                            isScanning: isScanning,
+                            onAnalyze: onAnalyze,
+                          ),
+                          AppSection.decision => DecisionInfoScreen(
+                            key: const ValueKey('decision'),
+                            result: globalResult,
+                          ),
+                          AppSection.data => DataInfoScreen(
+                            key: const ValueKey('data'),
+                            metadata: metadata,
+                            target: globalTarget,
+                            result: globalResult,
+                            installedApps: installedApps,
+                          ),
+                          AppSection.xai => XaiInfoScreen(
+                            key: const ValueKey('xai'),
+                            result: globalResult,
+                            isScanning: isScanning,
+                          ),
+                          AppSection.services => ServicesInfoScreen(
+                            key: const ValueKey('services'),
+                            installedApps: installedApps,
+                            onOpenUsageAccess: onOpenUsageAccess,
+                          ),
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (navOpen)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: () => onSelectSection(section),
+                  child: ColoredBox(
+                    color: Colors.black.withValues(alpha: 0.38),
+                  ),
+                ),
+              ),
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              top: 0,
+              bottom: 0,
+              left: navOpen ? 0 : -112,
+              child: SideNavBar(selected: section, onSelect: onSelectSection),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class AppHeader extends StatelessWidget {
+  const AppHeader({super.key, required this.onShieldTap});
+
+  final VoidCallback onShieldTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Tooltip(
+          message: 'Abrir navegacion',
+          child: InkWell(
+            onTap: onShieldTap,
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              width: 58,
+              height: 58,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: AppColors.cyan.withValues(alpha: 0.7),
+                ),
+                color: AppColors.cyan.withValues(alpha: 0.12),
+              ),
+              child: const Icon(Icons.security_rounded, color: AppColors.cyan),
+            ),
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'MXAI Detector',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Mobile Android analysis',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: AppColors.lime.withValues(alpha: 0.7)),
+            color: AppColors.lime.withValues(alpha: 0.09),
+          ),
+          child: const Icon(Icons.check_rounded, color: AppColors.lime),
+        ),
+      ],
+    );
+  }
+}
+
+class SideNavBar extends StatelessWidget {
+  const SideNavBar({super.key, required this.selected, required this.onSelect});
+
+  final AppSection selected;
+  final ValueChanged<AppSection> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      _NavItem(AppSection.scanner, Icons.radar_rounded, 'Inicio'),
+      _NavItem(AppSection.decision, Icons.rule_rounded, 'Decision'),
+      _NavItem(AppSection.data, Icons.layers_rounded, 'Datos'),
+      _NavItem(AppSection.xai, Icons.psychology_alt_rounded, 'XAI'),
+      _NavItem(AppSection.services, Icons.settings_suggest_rounded, 'SDK'),
+    ];
+
+    return SafeArea(
+      right: false,
+      child: Container(
+        width: 104,
+        margin: const EdgeInsets.fromLTRB(10, 10, 0, 10),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          color: AppColors.panel.withValues(alpha: 0.96),
+          border: Border.all(color: AppColors.cyan.withValues(alpha: 0.28)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.35),
+              blurRadius: 24,
+              offset: const Offset(10, 0),
+            ),
+          ],
+        ),
+        child: Column(
+          children: [
+            const Icon(Icons.security_rounded, color: AppColors.cyan),
+            const SizedBox(height: 12),
+            for (final item in items)
+              _NavButton(
+                item: item,
+                selected: item.section == selected,
+                onTap: () => onSelect(item.section),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NavItem {
+  const _NavItem(this.section, this.icon, this.label);
+
+  final AppSection section;
+  final IconData icon;
+  final String label;
+}
+
+class _NavButton extends StatelessWidget {
+  const _NavButton({
+    required this.item,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final _NavItem item;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? AppColors.voidBlack : AppColors.cyan;
+    return Tooltip(
+      message: item.label,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 9),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            color: selected ? AppColors.cyan : Colors.transparent,
+            border: Border.all(
+              color: selected ? AppColors.cyan : AppColors.line,
+            ),
           ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const _Header(),
-              const SizedBox(height: 18),
-              if (isWide)
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      flex: 5,
-                      child: AnalysisPanel(
-                        metadata: metadata,
-                        target: target,
-                        error: error,
-                        isScanning: isScanning,
-                        onPickApk: onPickApk,
-                        onAnalyze: onAnalyze,
+              Icon(item.icon, color: color, size: 20),
+              const SizedBox(height: 5),
+              Text(
+                item.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ScannerHomeScreen extends StatelessWidget {
+  const ScannerHomeScreen({
+    super.key,
+    required this.metadata,
+    required this.target,
+    required this.result,
+    required this.error,
+    required this.isScanning,
+    required this.onAnalyze,
+  });
+
+  final ModelMetadata metadata;
+  final ScanTarget target;
+  final ScanResult? result;
+  final String? error;
+  final bool isScanning;
+  final VoidCallback onAnalyze;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('scanner-home'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        GlobalSummaryCard(metadata: metadata, target: target, error: error),
+        const SizedBox(height: 18),
+        ScanStage(target: target, result: result, isScanning: isScanning),
+        const SizedBox(height: 18),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: isScanning ? null : onAnalyze,
+            icon: isScanning
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.radar_rounded),
+            label: Text(isScanning ? 'Analizando' : 'Analizar'),
+          ),
+        ),
+        const SizedBox(height: 18),
+        XaiGenerationPanel(result: result, isScanning: isScanning),
+      ],
+    );
+  }
+}
+
+class GlobalSummaryCard extends StatelessWidget {
+  const GlobalSummaryCard({
+    super.key,
+    required this.metadata,
+    required this.target,
+    required this.error,
+  });
+
+  final ModelMetadata metadata;
+  final ScanTarget target;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.android_rounded,
+                color: AppColors.cyan,
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Analisis global',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              Text(
+                '${metadata.featureCount} cols',
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(color: AppColors.cyan),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'Listo para escanear',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            target.packageName ?? 'Apps, permisos y comportamiento observado',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+          ),
+          if (error != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              error!,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.danger),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class ScanStage extends StatelessWidget {
+  const ScanStage({
+    super.key,
+    required this.target,
+    required this.result,
+    required this.isScanning,
+  });
+
+  final ScanTarget target;
+  final ScanResult? result;
+  final bool isScanning;
+
+  @override
+  Widget build(BuildContext context) {
+    final currentResult = result;
+    final accent = currentResult == null
+        ? AppColors.cyan
+        : currentResult.label == DetectionLabel.malware
+        ? AppColors.danger
+        : AppColors.lime;
+
+    return Panel(
+      child: Column(
+        children: [
+          AnimatedScannerGauge(
+            value: currentResult?.malwareProbability ?? 0,
+            isScanning: isScanning,
+            accent: accent,
+            centerBuilder: (context, progress) {
+              if (isScanning) {
+                return _GaugeText(
+                  headline: '${(progress * 100).round()}%',
+                  title: 'Analizando',
+                  subtitle: 'Apps del dispositivo',
+                  accent: AppColors.cyan,
+                );
+              }
+              if (currentResult != null) {
+                return _GaugeText(
+                  headline: currentResult.label.displayName,
+                  title: 'Riesgo ${_percent(currentResult.malwareProbability)}',
+                  subtitle: 'Confianza ${_percent(currentResult.confidence)}',
+                  accent: accent,
+                );
+              }
+              return const _GaugeText(
+                headline: '0%',
+                title: 'Listo para escanear',
+                subtitle: 'Analisis global',
+                accent: AppColors.cyan,
+              );
+            },
+          ),
+          const SizedBox(height: 14),
+          Text(
+            _stageStatus(result, isScanning),
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _stageStatus(ScanResult? result, bool scanning) {
+    if (scanning) {
+      return 'Construyendo vector global de senales';
+    }
+    if (result != null) {
+      return 'Decision lista: ${result.label.displayName}';
+    }
+    return 'Sin analisis ejecutado';
+  }
+}
+
+class DecisionInfoScreen extends StatelessWidget {
+  const DecisionInfoScreen({super.key, required this.result});
+
+  final ScanResult? result;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = result;
+    return SectionScaffold(
+      title: 'Decision',
+      icon: Icons.rule_rounded,
+      children: [
+        _InfoBlock(
+          icon: Icons.model_training_rounded,
+          title: 'Como decide el sistema',
+          text:
+              'MXAI convierte las senales observadas en un vector de 470 columnas. El modelo entrenado produce una probabilidad Benign/Malware; el chat XAI solo explica, no clasifica.',
+        ),
+        const SizedBox(height: 14),
+        if (current == null)
+          const _InfoBlock(
+            icon: Icons.pending_rounded,
+            title: 'Sin decision',
+            text:
+                'Ejecuta Analizar en Inicio para generar una decision global.',
+          )
+        else
+          DecisionScoreCard(result: current),
+      ],
+    );
+  }
+}
+
+class DataInfoScreen extends StatelessWidget {
+  const DataInfoScreen({
+    super.key,
+    required this.metadata,
+    required this.target,
+    required this.result,
+    required this.installedApps,
+  });
+
+  final ModelMetadata metadata;
+  final ScanTarget target;
+  final ScanResult? result;
+  final List<InstalledAndroidApp> installedApps;
+
+  @override
+  Widget build(BuildContext context) {
+    return SectionScaffold(
+      title: 'Datos',
+      icon: Icons.layers_rounded,
+      children: [
+        _DataRow(
+          label: 'Vector esperado',
+          value: '${metadata.featureCount} columnas',
+        ),
+        _DataRow(label: 'Modelo', value: metadata.modelName),
+        _DataRow(label: 'ROC AUC', value: _percent(metadata.metrics.rocAuc)),
+        _DataRow(label: 'Apps observadas', value: '${installedApps.length}'),
+        _DataRow(label: 'Fuente', value: target.sourceLabel),
+        const SizedBox(height: 14),
+        Text(
+          'Importancia global',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(color: AppColors.cyan),
+        ),
+        const SizedBox(height: 10),
+        for (final item in metadata.globalImportance.take(6))
+          _ProgressRow(
+            label: item.feature,
+            value: (item.importance / 0.026).clamp(0.02, 1),
+            color: AppColors.cyan,
+          ),
+        const SizedBox(height: 12),
+        if (result != null) ...[
+          Text(
+            'Importancia local',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(color: AppColors.cyan),
+          ),
+          const SizedBox(height: 10),
+          for (final factor in result!.localFactors.take(6))
+            _ProgressRow(
+              label: factor.feature,
+              value: (factor.impact.abs() / 0.03).clamp(0.05, 1),
+              color: factor.increasesRisk ? AppColors.danger : AppColors.lime,
+            ),
+        ],
+      ],
+    );
+  }
+}
+
+class XaiInfoScreen extends StatelessWidget {
+  const XaiInfoScreen({
+    super.key,
+    required this.result,
+    required this.isScanning,
+  });
+
+  final ScanResult? result;
+  final bool isScanning;
+
+  @override
+  Widget build(BuildContext context) {
+    return SectionScaffold(
+      title: 'Chat XAI',
+      icon: Icons.psychology_alt_rounded,
+      children: [
+        XaiGenerationPanel(result: result, isScanning: isScanning),
+        const SizedBox(height: 14),
+        const _InfoBlock(
+          icon: Icons.chat_rounded,
+          title: 'Rol del chat',
+          text:
+              'El chat recibe la decision, probabilidades y factores locales. Su salida debe ser explicativa y trazable, sin sustituir al modelo ML.',
+        ),
+      ],
+    );
+  }
+}
+
+class ServicesInfoScreen extends StatelessWidget {
+  const ServicesInfoScreen({
+    super.key,
+    required this.installedApps,
+    required this.onOpenUsageAccess,
+  });
+
+  final List<InstalledAndroidApp> installedApps;
+  final Future<void> Function() onOpenUsageAccess;
+
+  @override
+  Widget build(BuildContext context) {
+    return SectionScaffold(
+      title: 'SDK Android',
+      icon: Icons.settings_suggest_rounded,
+      children: [
+        const _InfoBlock(
+          icon: Icons.install_mobile_rounded,
+          title: 'Activacion fuera de la app',
+          text:
+              'El SDK registra MXAI como receptor de archivos APK externos. Cuando Android abre o comparte un APK con MXAI, se lanza una ventana de analisis externa con explicabilidad.',
+        ),
+        const SizedBox(height: 14),
+        _DataRow(label: 'Apps cacheadas', value: '${installedApps.length}'),
+        const _DataRow(label: 'Permiso', value: 'QUERY_ALL_PACKAGES'),
+        const _DataRow(label: 'Servicio', value: 'AppAnalysisService'),
+        const _DataRow(label: 'Intent', value: 'VIEW/SEND APK'),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: () => onOpenUsageAccess(),
+            icon: const Icon(Icons.settings_rounded),
+            label: const Text('Abrir acceso de uso'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class ExternalApkAnalysisWindow extends StatelessWidget {
+  const ExternalApkAnalysisWindow({
+    super.key,
+    required this.metadata,
+    required this.target,
+    required this.result,
+    required this.isScanning,
+    required this.error,
+    required this.onClose,
+  });
+
+  final ModelMetadata metadata;
+  final ScanTarget target;
+  final ScanResult? result;
+  final bool isScanning;
+  final String? error;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.voidBlack,
+      child: Stack(
+        children: [
+          const Positioned.fill(child: FuturisticBackground()),
+          SafeArea(
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 470),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          IconButton(
+                            tooltip: 'Cerrar',
+                            onPressed: onClose,
+                            icon: const Icon(Icons.close_rounded),
+                          ),
+                          Expanded(
+                            child: Text(
+                              'Analisis externo',
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                          ),
+                          Text(
+                            '${metadata.featureCount} cols',
+                            style: Theme.of(context).textTheme.labelLarge
+                                ?.copyWith(color: AppColors.cyan),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      flex: 4,
-                      child: PredictionPanel(
+                      const SizedBox(height: 14),
+                      Panel(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(
+                                  Icons.file_present_rounded,
+                                  color: AppColors.cyan,
+                                ),
+                                SizedBox(width: 10),
+                                Expanded(child: Text('APK externo recibido')),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              target.name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              target.path ?? target.sizeLabel,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: AppColors.muted),
+                            ),
+                            if (error != null) ...[
+                              const SizedBox(height: 10),
+                              Text(
+                                error!,
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(color: AppColors.danger),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      ScanStage(
+                        target: target,
                         result: result,
                         isScanning: isScanning,
                       ),
-                    ),
-                  ],
-                )
-              else ...[
-                AnalysisPanel(
-                  metadata: metadata,
-                  target: target,
-                  error: error,
-                  isScanning: isScanning,
-                  onPickApk: onPickApk,
-                  onAnalyze: onAnalyze,
+                      const SizedBox(height: 18),
+                      XaiGenerationPanel(
+                        result: result,
+                        isScanning: isScanning,
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 14),
-                PredictionPanel(result: result, isScanning: isScanning),
-              ],
-              const SizedBox(height: 14),
-              PipelinePanel(
-                target: target,
-                result: result,
-                isScanning: isScanning,
               ),
-              const SizedBox(height: 14),
-              if (isWide)
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(child: ExplanationPanel(result: result)),
-                    const SizedBox(width: 16),
-                    Expanded(child: ModelPanel(metadata: metadata)),
-                  ],
-                )
-              else ...[
-                ExplanationPanel(result: result),
-                const SizedBox(height: 14),
-                ModelPanel(metadata: metadata),
-              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SectionScaffold extends StatelessWidget {
+  const SectionScaffold({
+    super.key,
+    required this.title,
+    required this.icon,
+    required this.children,
+  });
+
+  final String title;
+  final IconData icon;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      child: Column(
+        key: ValueKey(title),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: AppColors.cyan),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          ...children,
+        ],
+      ),
+    );
+  }
+}
+
+class XaiGenerationPanel extends StatelessWidget {
+  const XaiGenerationPanel({
+    super.key,
+    required this.result,
+    required this.isScanning,
+  });
+
+  final ScanResult? result;
+  final bool isScanning;
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.psychology_alt_rounded, color: AppColors.cyan),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Generacion XAI',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              Text(
+                result == null ? 'Ollama' : result!.label.displayName,
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(color: AppColors.cyan),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: _buildBody(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody(BuildContext context) {
+    if (isScanning) {
+      return const _GeneratingText(key: ValueKey('generating'));
+    }
+
+    final current = result;
+    if (current == null) {
+      return Text(
+        'La explicacion aparecera aqui despues de la decision del modelo. El LLM no clasifica; solo traduce probabilidades y factores locales a texto.',
+        key: const ValueKey('empty-xai'),
+        style: Theme.of(
+          context,
+        ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+      );
+    }
+
+    return Text(
+      _xaiText(current),
+      key: const ValueKey('xai-result'),
+      style: Theme.of(context).textTheme.bodyMedium,
+    );
+  }
+
+  String _xaiText(ScanResult result) {
+    final top = result.localFactors
+        .take(3)
+        .map((factor) => factor.feature)
+        .join(', ');
+    final direction = result.label == DetectionLabel.malware
+        ? 'aumentan el riesgo observado'
+        : 'reducen el riesgo observado';
+    return 'El modelo predice ${result.label.displayName} con ${_percent(result.confidence)} de confianza. Las senales locales mas relevantes son $top; estas $direction. Cuando Ollama este conectado, esta base se convertira en una explicacion natural y trazable.';
+  }
+}
+
+class DecisionScoreCard extends StatelessWidget {
+  const DecisionScoreCard({super.key, required this.result});
+
+  final ScanResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = result.label == DetectionLabel.malware
+        ? AppColors.danger
+        : AppColors.lime;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: accent.withValues(alpha: 0.42)),
+        color: AppColors.ink.withValues(alpha: 0.7),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.bolt_rounded, color: accent),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  result.label.displayName,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.headlineMedium?.copyWith(color: accent),
+                ),
+              ),
+              Text(_percent(result.confidence)),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _ProgressRow(
+            label: 'Malware',
+            value: result.malwareProbability,
+            color: AppColors.danger,
+          ),
+          _ProgressRow(
+            label: 'Benign',
+            value: result.benignProbability,
+            color: AppColors.lime,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GaugeText extends StatelessWidget {
+  const _GaugeText({
+    required this.headline,
+    required this.title,
+    required this.subtitle,
+    required this.accent,
+  });
+
+  final String headline;
+  final String title;
+  final String subtitle;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        FittedBox(
+          child: Text(
+            headline,
+            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+              color: accent,
+              fontSize: 42,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(title, style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 4),
+        SizedBox(
+          width: 170,
+          child: Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class AnimatedScannerGauge extends StatefulWidget {
+  const AnimatedScannerGauge({
+    super.key,
+    required this.value,
+    required this.isScanning,
+    required this.accent,
+    required this.centerBuilder,
+  });
+
+  final double value;
+  final bool isScanning;
+  final Color accent;
+  final Widget Function(BuildContext context, double progress) centerBuilder;
+
+  @override
+  State<AnimatedScannerGauge> createState() => _AnimatedScannerGaugeState();
+}
+
+class _AnimatedScannerGaugeState extends State<AnimatedScannerGauge>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1700),
+    );
+    if (widget.isScanning) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AnimatedScannerGauge oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isScanning && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.isScanning && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        final scanningProgress = 0.18 + (_controller.value * 0.68);
+        final value = widget.isScanning ? scanningProgress : widget.value;
+        return SizedBox(
+          width: 260,
+          height: 260,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              CustomPaint(
+                size: const Size.square(260),
+                painter: _ScannerGaugePainter(
+                  value: value,
+                  sweep: _controller.value,
+                  accent: widget.accent,
+                  scanning: widget.isScanning,
+                ),
+              ),
+              widget.centerBuilder(context, value),
             ],
           ),
         );
@@ -253,769 +1345,169 @@ class _LoadedDetectorView extends StatelessWidget {
   }
 }
 
-class _Header extends StatelessWidget {
-  const _Header();
-
-  @override
-  Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    return Row(
-      children: [
-        Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: AppColors.cyan.withValues(alpha: 0.7)),
-            color: AppColors.cyan.withValues(alpha: 0.11),
-          ),
-          child: const Icon(Icons.security_rounded, color: AppColors.cyan),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('MXAI Detector', style: textTheme.headlineMedium),
-              const SizedBox(height: 4),
-              Text(
-                'Android malware analysis console',
-                style: textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
-        ),
-        const _StatusBeacon(),
-      ],
-    );
-  }
-}
-
-class _StatusBeacon extends StatelessWidget {
-  const _StatusBeacon();
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: 'Metadata del modelo cargada',
-      child: Container(
-        width: 42,
-        height: 42,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: AppColors.lime.withValues(alpha: 0.7)),
-          color: AppColors.lime.withValues(alpha: 0.09),
-        ),
-        child: const Icon(Icons.check_rounded, color: AppColors.lime, size: 22),
-      ),
-    );
-  }
-}
-
-class AnalysisPanel extends StatelessWidget {
-  const AnalysisPanel({
-    super.key,
-    required this.metadata,
-    required this.target,
-    required this.error,
-    required this.isScanning,
-    required this.onPickApk,
-    required this.onAnalyze,
-  });
-
-  final ModelMetadata metadata;
-  final ScanTarget? target;
-  final String? error;
-  final bool isScanning;
-  final VoidCallback onPickApk;
-  final VoidCallback onAnalyze;
-
-  @override
-  Widget build(BuildContext context) {
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const PanelTitle(icon: Icons.android_rounded, title: 'Entrada APK'),
-          const SizedBox(height: 18),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: AppColors.line),
-              color: AppColors.ink.withValues(alpha: 0.52),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 54,
-                  height: 54,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(8),
-                    color: AppColors.cyan.withValues(alpha: 0.1),
-                    border: Border.all(
-                      color: AppColors.cyan.withValues(alpha: 0.5),
-                    ),
-                  ),
-                  child: const Icon(
-                    Icons.upload_file_rounded,
-                    color: AppColors.cyan,
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        target?.name ?? 'Sin APK seleccionado',
-                        style: Theme.of(context).textTheme.titleMedium,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        target?.sizeLabel ??
-                            '${metadata.featureCount} columnas esperadas',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppColors.muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (error != null) ...[
-            const SizedBox(height: 12),
-            Text(
-              error!,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: AppColors.danger),
-            ),
-          ],
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              FilledButton.icon(
-                onPressed: isScanning ? null : onPickApk,
-                icon: const Icon(Icons.folder_open_rounded),
-                label: const Text('Seleccionar APK'),
-              ),
-              OutlinedButton.icon(
-                onPressed: target == null || isScanning ? null : onAnalyze,
-                icon: isScanning
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.radar_rounded),
-                label: Text(isScanning ? 'Analizando' : 'Analizar'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          _MetricStrip(metadata: metadata),
-        ],
-      ),
-    );
-  }
-}
-
-class _MetricStrip extends StatelessWidget {
-  const _MetricStrip({required this.metadata});
-
-  final ModelMetadata metadata;
-
-  @override
-  Widget build(BuildContext context) {
-    final items = [
-      ('Modelo', metadata.modelName),
-      ('Features', '${metadata.featureCount}'),
-      ('ROC AUC', _percent(metadata.metrics.rocAuc)),
-    ];
-
-    return Row(
-      children: [
-        for (var i = 0; i < items.length; i++) ...[
-          Expanded(
-            child: _MetricTile(label: items[i].$1, value: items[i].$2),
-          ),
-          if (i < items.length - 1) const SizedBox(width: 10),
-        ],
-      ],
-    );
-  }
-}
-
-class _MetricTile extends StatelessWidget {
-  const _MetricTile({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(minHeight: 76),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        color: AppColors.ink.withValues(alpha: 0.48),
-        border: Border.all(color: AppColors.line),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            label,
-            style: Theme.of(
-              context,
-            ).textTheme.labelMedium?.copyWith(color: AppColors.muted),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 6),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Text(
-              value,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: AppColors.cyan,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class PredictionPanel extends StatelessWidget {
-  const PredictionPanel({
-    super.key,
-    required this.result,
-    required this.isScanning,
-  });
-
-  final ScanResult? result;
-  final bool isScanning;
-
-  @override
-  Widget build(BuildContext context) {
-    final current = result;
-
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const PanelTitle(icon: Icons.bolt_rounded, title: 'Prediccion'),
-          const SizedBox(height: 18),
-          if (isScanning)
-            const _ScanInProgress()
-          else if (current == null)
-            const _EmptyPrediction()
-          else
-            _PredictionResult(result: current),
-        ],
-      ),
-    );
-  }
-}
-
-class _ScanInProgress extends StatelessWidget {
-  const _ScanInProgress();
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 286,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const SizedBox(
-            width: 92,
-            height: 92,
-            child: CircularProgressIndicator(strokeWidth: 3),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'Generando vector',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Extractor compatible en preparacion',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _EmptyPrediction extends StatelessWidget {
-  const _EmptyPrediction();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 286,
-      alignment: Alignment.center,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.radar_rounded,
-            color: AppColors.cyan.withValues(alpha: 0.65),
-            size: 74,
-          ),
-          const SizedBox(height: 14),
-          Text(
-            'Esperando muestra',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Resultado Benign/Malware',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PredictionResult extends StatelessWidget {
-  const _PredictionResult({required this.result});
-
-  final ScanResult result;
-
-  @override
-  Widget build(BuildContext context) {
-    final isMalware = result.label == DetectionLabel.malware;
-    final accent = isMalware ? AppColors.danger : AppColors.lime;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Center(
-          child: RiskGauge(
-            value: result.malwareProbability,
-            label: result.label.displayName,
-            accent: accent,
-          ),
-        ),
-        const SizedBox(height: 20),
-        _ProbabilityBars(result: result),
-        const SizedBox(height: 18),
-        Row(
-          children: [
-            Icon(Icons.verified_rounded, size: 18, color: accent),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Confianza ${_percent(result.confidence)}',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-            ),
-          ],
-        ),
-        if (result.isPrototype) ...[
-          const SizedBox(height: 12),
-          Text(
-            'Modo prototipo: falta conectar extractor real y backend del joblib.',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: AppColors.amber),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-class _ProbabilityBars extends StatelessWidget {
-  const _ProbabilityBars({required this.result});
-
-  final ScanResult result;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _ProbabilityBar(
-          label: 'Malware',
-          value: result.malwareProbability,
-          color: AppColors.danger,
-        ),
-        const SizedBox(height: 10),
-        _ProbabilityBar(
-          label: 'Benign',
-          value: result.benignProbability,
-          color: AppColors.lime,
-        ),
-      ],
-    );
-  }
-}
-
-class _ProbabilityBar extends StatelessWidget {
-  const _ProbabilityBar({
-    required this.label,
+class _ScannerGaugePainter extends CustomPainter {
+  const _ScannerGaugePainter({
     required this.value,
-    required this.color,
+    required this.sweep,
+    required this.accent,
+    required this.scanning,
   });
 
-  final String label;
   final double value;
-  final Color color;
+  final double sweep;
+  final Color accent;
+  final bool scanning;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = math.min(size.width, size.height) / 2 - 18;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    final base = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 11
+      ..strokeCap = StrokeCap.round
+      ..color = AppColors.ink;
+    final progress = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 11
+      ..strokeCap = StrokeCap.round
+      ..shader = SweepGradient(
+        startAngle: -math.pi / 2,
+        endAngle: math.pi * 1.5,
+        colors: [
+          accent.withValues(alpha: 0.18),
+          accent,
+          AppColors.lime.withValues(alpha: scanning ? 0.8 : 0.25),
+        ],
+      ).createShader(rect);
+    final pulse = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
+      ..color = accent.withValues(alpha: scanning ? 0.25 : 0.12);
+    final tick = Paint()
+      ..strokeWidth = 1
+      ..color = AppColors.cyan.withValues(alpha: 0.24);
+
+    canvas.drawCircle(center, radius, base);
+    canvas.drawArc(rect, -math.pi / 2, math.pi * 2 * value, false, progress);
+    canvas.drawCircle(
+      center,
+      radius - 34 + (scanning ? math.sin(sweep * math.pi * 2) * 5 : 0),
+      pulse,
+    );
+
+    for (var i = 0; i < 48; i++) {
+      final angle = -math.pi / 2 + (math.pi * 2 * i / 48);
+      final inner = Offset(
+        center.dx + math.cos(angle) * (radius - 28),
+        center.dy + math.sin(angle) * (radius - 28),
+      );
+      final outer = Offset(
+        center.dx + math.cos(angle) * (radius - 20),
+        center.dy + math.sin(angle) * (radius - 20),
+      );
+      canvas.drawLine(inner, outer, tick);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ScannerGaugePainter oldDelegate) {
+    return oldDelegate.value != value ||
+        oldDelegate.sweep != sweep ||
+        oldDelegate.accent != accent ||
+        oldDelegate.scanning != scanning;
+  }
+}
+
+class _GeneratingText extends StatelessWidget {
+  const _GeneratingText({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(child: Text(label)),
-            Text(_percent(value)),
-          ],
-        ),
-        const SizedBox(height: 6),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            value: value,
-            minHeight: 9,
-            backgroundColor: AppColors.ink,
-            color: color,
-          ),
-        ),
+      children: const [
+        _SkeletonLine(widthFactor: 1),
+        SizedBox(height: 9),
+        _SkeletonLine(widthFactor: 0.78),
+        SizedBox(height: 9),
+        _SkeletonLine(widthFactor: 0.55),
       ],
     );
   }
 }
 
-class PipelinePanel extends StatelessWidget {
-  const PipelinePanel({
-    super.key,
-    required this.target,
-    required this.result,
-    required this.isScanning,
-  });
+class _SkeletonLine extends StatelessWidget {
+  const _SkeletonLine({required this.widthFactor});
 
-  final ScanTarget? target;
-  final ScanResult? result;
-  final bool isScanning;
+  final double widthFactor;
 
   @override
   Widget build(BuildContext context) {
-    final nodes = [
-      _PipelineNode(
-        icon: Icons.android_rounded,
-        label: 'APK',
-        state: target != null ? PipelineState.ready : PipelineState.pending,
-      ),
-      _PipelineNode(
-        icon: Icons.schema_rounded,
-        label: 'Extractor',
-        state: result != null || isScanning
-            ? PipelineState.prototype
-            : PipelineState.pending,
-      ),
-      _PipelineNode(
-        icon: Icons.grid_on_rounded,
-        label: '470 columnas',
-        state: result != null ? PipelineState.prototype : PipelineState.pending,
-      ),
-      _PipelineNode(
-        icon: Icons.memory_rounded,
-        label: 'Joblib',
-        state: result != null ? PipelineState.blocked : PipelineState.pending,
-      ),
-      _PipelineNode(
-        icon: Icons.analytics_rounded,
-        label: 'SHAP',
-        state: result != null ? PipelineState.blocked : PipelineState.pending,
-      ),
-      _PipelineNode(
-        icon: Icons.psychology_alt_rounded,
-        label: 'Ollama',
-        state: result != null ? PipelineState.blocked : PipelineState.pending,
-      ),
-    ];
-
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const PanelTitle(
-            icon: Icons.account_tree_rounded,
-            title: 'Cadena ML',
-          ),
-          const SizedBox(height: 16),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final wide = constraints.maxWidth >= 760;
-              if (!wide) {
-                return Column(
-                  children: [
-                    for (var i = 0; i < nodes.length; i++) ...[
-                      nodes[i],
-                      if (i < nodes.length - 1)
-                        const SizedBox(height: 10, child: _VerticalConnector()),
-                    ],
-                  ],
-                );
-              }
-
-              return Row(
-                children: [
-                  for (var i = 0; i < nodes.length; i++) ...[
-                    Expanded(child: nodes[i]),
-                    if (i < nodes.length - 1)
-                      const SizedBox(width: 22, child: _HorizontalConnector()),
-                  ],
-                ],
-              );
-            },
-          ),
-        ],
+    return FractionallySizedBox(
+      widthFactor: widthFactor,
+      alignment: Alignment.centerLeft,
+      child: Container(
+        height: 12,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(4),
+          color: AppColors.cyan.withValues(alpha: 0.16),
+        ),
       ),
     );
   }
 }
 
-enum PipelineState { ready, prototype, blocked, pending }
-
-class _PipelineNode extends StatelessWidget {
-  const _PipelineNode({
+class _InfoBlock extends StatelessWidget {
+  const _InfoBlock({
     required this.icon,
-    required this.label,
-    required this.state,
+    required this.title,
+    required this.text,
   });
 
   final IconData icon;
-  final String label;
-  final PipelineState state;
+  final String title;
+  final String text;
 
   @override
   Widget build(BuildContext context) {
-    final (color, statusIcon, tooltip) = switch (state) {
-      PipelineState.ready => (AppColors.lime, Icons.check_rounded, 'Activo'),
-      PipelineState.prototype => (
-        AppColors.amber,
-        Icons.construction_rounded,
-        'Prototipo',
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.line),
+        color: AppColors.ink.withValues(alpha: 0.68),
       ),
-      PipelineState.blocked => (
-        AppColors.danger,
-        Icons.link_off_rounded,
-        'Pendiente de conexion',
-      ),
-      PipelineState.pending => (
-        AppColors.muted,
-        Icons.more_horiz_rounded,
-        'En espera',
-      ),
-    };
-
-    return Tooltip(
-      message: tooltip,
-      child: Container(
-        constraints: const BoxConstraints(minHeight: 94),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: color.withValues(alpha: 0.45)),
-          color: AppColors.ink.withValues(alpha: 0.44),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: color),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 6),
-            Icon(statusIcon, size: 16, color: color),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class ExplanationPanel extends StatelessWidget {
-  const ExplanationPanel({super.key, required this.result});
-
-  final ScanResult? result;
-
-  @override
-  Widget build(BuildContext context) {
-    final current = result;
-    return Panel(
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const PanelTitle(
-            icon: Icons.insights_rounded,
-            title: 'Explicabilidad',
-          ),
-          const SizedBox(height: 16),
-          if (current == null)
-            _MutedLine(
-              icon: Icons.pending_rounded,
-              text: 'SHAP local y explicacion Ollama quedan en espera.',
-            )
-          else ...[
-            for (final factor in current.localFactors)
-              _FactorRow(factor: factor),
-            const SizedBox(height: 14),
-            _MutedLine(
-              icon: Icons.psychology_alt_rounded,
-              text:
-                  'Ollama recibira prediccion, probabilidades y factores locales.',
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _FactorRow extends StatelessWidget {
-  const _FactorRow({required this.factor});
-
-  final LocalFactor factor;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = factor.increasesRisk ? AppColors.danger : AppColors.lime;
-    final normalized = (factor.impact.abs() / 0.03).clamp(0.08, 1.0);
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        children: [
-          Icon(
-            factor.increasesRisk
-                ? Icons.trending_up_rounded
-                : Icons.trending_down_rounded,
-            color: color,
-            size: 19,
-          ),
-          const SizedBox(width: 10),
+          Icon(icon, color: AppColors.cyan),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text(title, style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 6),
                 Text(
-                  factor.feature,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 5),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: normalized,
-                    minHeight: 6,
-                    color: color,
-                    backgroundColor: AppColors.ink,
-                  ),
+                  text,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 96,
-            child: Text(
-              factor.evidence,
-              textAlign: TextAlign.right,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(
-                context,
-              ).textTheme.labelSmall?.copyWith(color: AppColors.muted),
-            ),
-          ),
         ],
       ),
     );
   }
 }
 
-class ModelPanel extends StatelessWidget {
-  const ModelPanel({super.key, required this.metadata});
-
-  final ModelMetadata metadata;
-
-  @override
-  Widget build(BuildContext context) {
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const PanelTitle(icon: Icons.dataset_rounded, title: 'Modelo'),
-          const SizedBox(height: 16),
-          _ModelStatLine(
-            label: 'Archivo',
-            value: 'android_malware_detector.joblib',
-          ),
-          _ModelStatLine(
-            label: 'Clases',
-            value: '${metadata.negativeClass} / ${metadata.positiveClass}',
-          ),
-          _ModelStatLine(
-            label: 'Accuracy',
-            value: _percent(metadata.metrics.accuracy),
-          ),
-          _ModelStatLine(
-            label: 'Recall malware',
-            value: _percent(metadata.metrics.recallMalware),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'Importancia global',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: AppColors.cyan,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 10),
-          for (final item in metadata.globalImportance.take(5))
-            _GlobalImportanceRow(item: item),
-        ],
-      ),
-    );
-  }
-}
-
-class _ModelStatLine extends StatelessWidget {
-  const _ModelStatLine({required this.label, required this.value});
+class _DataRow extends StatelessWidget {
+  const _DataRow({required this.label, required this.value});
 
   final String label;
   final String value;
@@ -1038,75 +1530,59 @@ class _ModelStatLine extends StatelessWidget {
             child: Text(
               value,
               textAlign: TextAlign.right,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GlobalImportanceRow extends StatelessWidget {
-  const _GlobalImportanceRow({required this.item});
-
-  final FeatureImportance item;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 9),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              item.feature,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 94,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                minHeight: 7,
-                value: (item.importance / 0.026).clamp(0.02, 1.0),
-                backgroundColor: AppColors.ink,
-                color: AppColors.cyan,
-              ),
-            ),
-          ),
         ],
       ),
     );
   }
 }
 
-class _MutedLine extends StatelessWidget {
-  const _MutedLine({required this.icon, required this.text});
+class _ProgressRow extends StatelessWidget {
+  const _ProgressRow({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
 
-  final IconData icon;
-  final String text;
+  final String label;
+  final double value;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, size: 18, color: AppColors.amber),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Text(
-            text,
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(_percent(value)),
+            ],
           ),
-        ),
-      ],
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: value,
+              minHeight: 8,
+              color: color,
+              backgroundColor: AppColors.voidBlack,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1137,131 +1613,6 @@ class Panel extends StatelessWidget {
   }
 }
 
-class PanelTitle extends StatelessWidget {
-  const PanelTitle({super.key, required this.icon, required this.title});
-
-  final IconData icon;
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, color: AppColors.cyan, size: 20),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Text(
-            title,
-            style: Theme.of(context).textTheme.titleMedium,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class RiskGauge extends StatelessWidget {
-  const RiskGauge({
-    super.key,
-    required this.value,
-    required this.label,
-    required this.accent,
-  });
-
-  final double value;
-  final String label;
-  final Color accent;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 210,
-      height: 210,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          CustomPaint(
-            size: const Size.square(210),
-            painter: _RiskGaugePainter(value: value, accent: accent),
-          ),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  color: accent,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                _percent(value),
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(color: AppColors.muted),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RiskGaugePainter extends CustomPainter {
-  const _RiskGaugePainter({required this.value, required this.accent});
-
-  final double value;
-  final Color accent;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = math.min(size.width, size.height) / 2 - 12;
-    final rect = Rect.fromCircle(center: center, radius: radius);
-    final backgroundPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 12
-      ..strokeCap = StrokeCap.round
-      ..color = AppColors.ink;
-    final valuePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 12
-      ..strokeCap = StrokeCap.round
-      ..shader = SweepGradient(
-        startAngle: -math.pi / 2,
-        endAngle: math.pi * 1.5,
-        colors: [accent.withValues(alpha: 0.2), accent],
-      ).createShader(rect);
-    final tickPaint = Paint()
-      ..strokeWidth = 1
-      ..color = AppColors.cyan.withValues(alpha: 0.34);
-
-    canvas.drawCircle(center, radius, backgroundPaint);
-    canvas.drawArc(rect, -math.pi / 2, math.pi * 2 * value, false, valuePaint);
-
-    for (var i = 0; i < 40; i++) {
-      final angle = -math.pi / 2 + (math.pi * 2 * i / 40);
-      final inner = Offset(
-        center.dx + math.cos(angle) * (radius - 25),
-        center.dy + math.sin(angle) * (radius - 25),
-      );
-      final outer = Offset(
-        center.dx + math.cos(angle) * (radius - 18),
-        center.dy + math.sin(angle) * (radius - 18),
-      );
-      canvas.drawLine(inner, outer, tickPaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _RiskGaugePainter oldDelegate) {
-    return oldDelegate.value != value || oldDelegate.accent != accent;
-  }
-}
-
 class FuturisticBackground extends StatelessWidget {
   const FuturisticBackground({super.key});
 
@@ -1286,10 +1637,10 @@ class _GridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final linePaint = Paint()
-      ..color = AppColors.cyan.withValues(alpha: 0.065)
+      ..color = AppColors.cyan.withValues(alpha: 0.06)
       ..strokeWidth = 1;
     final strongPaint = Paint()
-      ..color = AppColors.lime.withValues(alpha: 0.09)
+      ..color = AppColors.lime.withValues(alpha: 0.08)
       ..strokeWidth = 1.2;
 
     const spacing = 42.0;
@@ -1301,36 +1652,18 @@ class _GridPainter extends CustomPainter {
     }
 
     final path = Path()
-      ..moveTo(size.width * 0.05, size.height * 0.18)
-      ..lineTo(size.width * 0.32, size.height * 0.18)
-      ..lineTo(size.width * 0.44, size.height * 0.31)
-      ..lineTo(size.width * 0.78, size.height * 0.31)
-      ..moveTo(size.width * 0.58, size.height * 0.08)
-      ..lineTo(size.width * 0.82, size.height * 0.08)
-      ..lineTo(size.width * 0.93, size.height * 0.2);
+      ..moveTo(size.width * 0.07, size.height * 0.22)
+      ..lineTo(size.width * 0.36, size.height * 0.22)
+      ..lineTo(size.width * 0.52, size.height * 0.36)
+      ..lineTo(size.width * 0.86, size.height * 0.36)
+      ..moveTo(size.width * 0.3, size.height * 0.78)
+      ..lineTo(size.width * 0.64, size.height * 0.78)
+      ..lineTo(size.width * 0.82, size.height * 0.9);
     canvas.drawPath(path, strongPaint);
   }
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _HorizontalConnector extends StatelessWidget {
-  const _HorizontalConnector();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(child: Container(height: 1, color: AppColors.line));
-  }
-}
-
-class _VerticalConnector extends StatelessWidget {
-  const _VerticalConnector();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(child: Container(width: 1, color: AppColors.line));
-  }
 }
 
 class _LoadingView extends StatelessWidget {
@@ -1352,7 +1685,6 @@ class AppColors {
   static const muted = Color(0xFF96A6AA);
   static const cyan = Color(0xFF28D8D1);
   static const lime = Color(0xFFA4F06C);
-  static const amber = Color(0xFFF2C94C);
   static const danger = Color(0xFFFF5570);
 }
 
