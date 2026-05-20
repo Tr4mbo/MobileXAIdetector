@@ -21,6 +21,7 @@ APK o comportamiento observado
 - La pantalla de analisis usa una animacion circular y deja la generacion XAI justo debajo del scanner, sin texto de APK en el flujo principal.
 - Decision, Datos, XAI y SDK son pantallas separadas accesibles desde una navbar vertical que se abre tocando el escudo.
 - Los APKs externos entran fuera de la app mediante intents Android `VIEW`/`SEND` y abren una ventana de analisis externa con explicabilidad.
+- El analisis global usa calibracion conservadora para reducir falsos positivos: separa apps de usuario de apps sistema/OEM y no marca Malware solo por conteo bruto de permisos.
 - La prediccion mostrada por Flutter todavia no usa el `.joblib`, porque un modelo scikit-learn serializado con joblib no se ejecuta directamente en Dart.
 - La capa de inferencia esta separada para conectar despues un backend Python, ONNX/TFLite o un plugin nativo.
 - Android incluye un puente MethodChannel para listar apps instaladas, recibir APKs externos y abrir ajustes de acceso de uso.

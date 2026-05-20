@@ -34,6 +34,10 @@ class PrototypeDetectionEngine implements DetectionEngine {
   }
 
   double _prototypeRiskScore(ScanTarget target) {
+    if (target.source == ScanSource.observedBehavior) {
+      return _globalPrototypeRiskScore(target);
+    }
+
     final name = target.name.toLowerCase();
     final hashPortion = (_stableHash(name) % 1000) / 1000;
     var score = 0.24 + (hashPortion * 0.34);
@@ -63,16 +67,28 @@ class PrototypeDetectionEngine implements DetectionEngine {
 
     if (target.source == ScanSource.installedApp) {
       score += name.contains('system') ? -0.04 : 0.03;
-    } else if (target.source == ScanSource.observedBehavior) {
-      final matches = RegExp(
-        r'\d+',
-      ).allMatches(target.packageName ?? '').toList(growable: false);
-      final sensitiveSignals = matches.isEmpty ? null : matches.last.group(0);
-      final signalCount = int.tryParse(sensitiveSignals ?? '0') ?? 0;
-      score += (signalCount / 500).clamp(0.0, 0.22);
     }
 
     return score.clamp(0.04, 0.96);
+  }
+
+  double _globalPrototypeRiskScore(ScanTarget target) {
+    final calibratedRisk = target.observedRiskScore;
+    if (calibratedRisk == null) {
+      return 0.18;
+    }
+
+    final highRiskApps = target.highRiskAppCount ?? 0;
+    final userApps = target.appCount ?? 0;
+    final baseScore = 0.10 + (calibratedRisk.clamp(0.0, 1.0) * 0.36);
+
+    // Global scans need a higher bar than single APK scans. Permission volume
+    // alone is noisy on Android, especially with system and preinstalled apps.
+    if (highRiskApps >= 3 && userApps >= 8 && calibratedRisk >= 0.86) {
+      return (0.52 + ((calibratedRisk - 0.86) * 0.5)).clamp(0.52, 0.68);
+    }
+
+    return baseScore.clamp(0.08, 0.48);
   }
 
   List<LocalFactor> _prototypeLocalFactors(

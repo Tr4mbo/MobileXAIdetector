@@ -1,6 +1,7 @@
 package com.example.mobile_x_ai_detector
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -127,6 +128,9 @@ class MainActivity : FlutterActivity() {
 private fun PackageInfo.toFlutterMap(packageManager: PackageManager): Map<String, Any?> {
     val appInfo = applicationInfo
     val label = appInfo?.loadLabel(packageManager)?.toString() ?: packageName
+    val flags = appInfo?.flags ?: 0
+    val isSystemApp = (flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+        (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
     val versionCodeValue = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
         longVersionCode
     } else {
@@ -142,6 +146,7 @@ private fun PackageInfo.toFlutterMap(packageManager: PackageManager): Map<String
         "firstInstallTime" to firstInstallTime,
         "lastUpdateTime" to lastUpdateTime,
         "requestedPermissions" to (requestedPermissions?.toList() ?: emptyList<String>()),
+        "isSystemApp" to isSystemApp,
         "sourceDir" to appInfo?.sourceDir
     )
 }

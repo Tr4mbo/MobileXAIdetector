@@ -180,45 +180,121 @@ class _DetectorScreenState extends State<DetectorScreen> {
   }
 
   ScanTarget _buildGlobalTarget(List<InstalledAndroidApp> apps) {
-    final sensitiveHits = _countSensitivePermissions(apps);
-    final name = sensitiveHits > 0
-        ? 'Analisis global sms bank risk $sensitiveHits'
-        : 'Analisis global del dispositivo';
+    final summary = _summarizeGlobalSignals(apps);
 
     return ScanTarget(
-      name: name,
-      sizeBytes: apps.length,
+      name: 'Analisis global del dispositivo',
+      sizeBytes: summary.userAppCount,
       source: ScanSource.observedBehavior,
       packageName:
-          '${apps.length} apps observadas, $sensitiveHits permisos sensibles',
+          '${summary.userAppCount} apps de usuario, ${summary.highRiskAppCount} con senales',
+      observedRiskScore: summary.riskScore,
+      appCount: summary.userAppCount,
+      systemAppCount: summary.systemAppCount,
+      sensitivePermissionCount: summary.sensitivePermissionCount,
+      highRiskAppCount: summary.highRiskAppCount,
     );
   }
 
-  int _countSensitivePermissions(List<InstalledAndroidApp> apps) {
-    const signals = [
-      'SEND_SMS',
-      'READ_SMS',
-      'RECEIVE_SMS',
-      'READ_CONTACTS',
-      'READ_PHONE_STATE',
-      'CALL_PHONE',
-      'ACCESS_FINE_LOCATION',
-      'RECORD_AUDIO',
-      'CAMERA',
-      'SYSTEM_ALERT_WINDOW',
-      'REQUEST_INSTALL_PACKAGES',
-      'QUERY_ALL_PACKAGES',
-    ];
+  _GlobalSignalSummary _summarizeGlobalSignals(List<InstalledAndroidApp> apps) {
+    final userApps = apps.where((app) => !_isPlatformApp(app)).toList();
+    final systemAppCount = apps.length - userApps.length;
+    var sensitivePermissionCount = 0;
+    var highRiskAppCount = 0;
+    var criticalAppCount = 0;
 
-    var count = 0;
-    for (final app in apps) {
-      for (final permission in app.requestedPermissions) {
-        if (signals.any(permission.contains)) {
-          count++;
-        }
+    for (final app in userApps) {
+      final appSignalScore = _permissionSignalScore(app.requestedPermissions);
+      sensitivePermissionCount += appSignalScore.permissionHits;
+      if (appSignalScore.score >= 7) {
+        highRiskAppCount++;
+      }
+      if (appSignalScore.score >= 11) {
+        criticalAppCount++;
       }
     }
-    return count;
+
+    final userAppCount = userApps.length;
+    if (userAppCount == 0) {
+      return _GlobalSignalSummary(
+        userAppCount: 0,
+        systemAppCount: systemAppCount,
+        sensitivePermissionCount: 0,
+        highRiskAppCount: 0,
+        criticalAppCount: 0,
+        riskScore: 0.08,
+      );
+    }
+
+    final highRiskDensity = highRiskAppCount / userAppCount;
+    final criticalDensity = criticalAppCount / userAppCount;
+    final permissionDensity = (sensitivePermissionCount / (userAppCount * 6))
+        .clamp(0.0, 1.0);
+    var riskScore =
+        (highRiskDensity * 0.48) +
+        (criticalDensity * 0.34) +
+        (permissionDensity * 0.10);
+
+    if (userAppCount < 5) {
+      riskScore *= 0.55;
+    }
+
+    return _GlobalSignalSummary(
+      userAppCount: userAppCount,
+      systemAppCount: systemAppCount,
+      sensitivePermissionCount: sensitivePermissionCount,
+      highRiskAppCount: highRiskAppCount,
+      criticalAppCount: criticalAppCount,
+      riskScore: riskScore.clamp(0.03, 0.95),
+    );
+  }
+
+  bool _isPlatformApp(InstalledAndroidApp app) {
+    final packageName = app.packageName.toLowerCase();
+    return app.isSystemApp ||
+        packageName.startsWith('android') ||
+        packageName.startsWith('com.android.') ||
+        packageName.startsWith('com.google.android.') ||
+        packageName.startsWith('com.samsung.') ||
+        packageName.startsWith('com.miui.') ||
+        packageName.startsWith('com.xiaomi.') ||
+        packageName.startsWith('com.huawei.') ||
+        packageName.startsWith('com.oppo.') ||
+        packageName.startsWith('com.vivo.') ||
+        packageName.startsWith('com.motorola.');
+  }
+
+  _PermissionSignalScore _permissionSignalScore(List<String> permissions) {
+    var score = 0;
+    var permissionHits = 0;
+    final seen = <String>{};
+
+    for (final permission in permissions) {
+      final normalized = permission.toUpperCase();
+      final weight = _permissionWeight(normalized);
+      if (weight == 0 || !seen.add(normalized)) {
+        continue;
+      }
+      permissionHits++;
+      score += weight;
+    }
+
+    return _PermissionSignalScore(score: score, permissionHits: permissionHits);
+  }
+
+  int _permissionWeight(String permission) {
+    if (permission.contains('SEND_SMS')) return 4;
+    if (permission.contains('SYSTEM_ALERT_WINDOW')) return 4;
+    if (permission.contains('REQUEST_INSTALL_PACKAGES')) return 4;
+    if (permission.contains('READ_SMS')) return 3;
+    if (permission.contains('RECEIVE_SMS')) return 2;
+    if (permission.contains('RECORD_AUDIO')) return 2;
+    if (permission.contains('READ_CONTACTS')) return 1;
+    if (permission.contains('READ_PHONE_STATE')) return 1;
+    if (permission.contains('CALL_PHONE')) return 1;
+    if (permission.contains('ACCESS_FINE_LOCATION')) return 1;
+    if (permission.contains('CAMERA')) return 1;
+    return 0;
   }
 
   void _selectSection(AppSection section) {
@@ -283,6 +359,34 @@ class _DetectorScreenState extends State<DetectorScreen> {
       ),
     );
   }
+}
+
+class _GlobalSignalSummary {
+  const _GlobalSignalSummary({
+    required this.userAppCount,
+    required this.systemAppCount,
+    required this.sensitivePermissionCount,
+    required this.highRiskAppCount,
+    required this.criticalAppCount,
+    required this.riskScore,
+  });
+
+  final int userAppCount;
+  final int systemAppCount;
+  final int sensitivePermissionCount;
+  final int highRiskAppCount;
+  final int criticalAppCount;
+  final double riskScore;
+}
+
+class _PermissionSignalScore {
+  const _PermissionSignalScore({
+    required this.score,
+    required this.permissionHits,
+  });
+
+  final int score;
+  final int permissionHits;
 }
 
 class _DetectorShell extends StatelessWidget {
@@ -778,7 +882,7 @@ class DecisionInfoScreen extends StatelessWidget {
           icon: Icons.model_training_rounded,
           title: 'Como decide el sistema',
           text:
-              'MXAI convierte las senales observadas en un vector de 470 columnas. El modelo entrenado produce una probabilidad Benign/Malware; el chat XAI solo explica, no clasifica.',
+              'MXAI convierte las senales observadas en un vector de 470 columnas. En analisis global la calibracion es conservadora: no basta contar permisos, se busca concentracion de senales en apps de usuario. El chat XAI solo explica, no clasifica.',
         ),
         const SizedBox(height: 14),
         if (current == null)
@@ -822,6 +926,19 @@ class DataInfoScreen extends StatelessWidget {
         _DataRow(label: 'Modelo', value: metadata.modelName),
         _DataRow(label: 'ROC AUC', value: _percent(metadata.metrics.rocAuc)),
         _DataRow(label: 'Apps observadas', value: '${installedApps.length}'),
+        _DataRow(label: 'Apps de usuario', value: '${target.appCount ?? 0}'),
+        _DataRow(
+          label: 'Apps sistema/OEM',
+          value: '${target.systemAppCount ?? 0}',
+        ),
+        _DataRow(
+          label: 'Permisos sensibles',
+          value: '${target.sensitivePermissionCount ?? 0}',
+        ),
+        _DataRow(
+          label: 'Apps con senales',
+          value: '${target.highRiskAppCount ?? 0}',
+        ),
         _DataRow(label: 'Fuente', value: target.sourceLabel),
         const SizedBox(height: 14),
         Text(
@@ -1158,8 +1275,8 @@ class XaiGenerationPanel extends StatelessWidget {
         .map((factor) => factor.feature)
         .join(', ');
     final direction = result.label == DetectionLabel.malware
-        ? 'aumentan el riesgo observado'
-        : 'reducen el riesgo observado';
+        ? 'muestran concentracion suficiente para elevar el riesgo'
+        : 'no muestran concentracion suficiente para elevar el riesgo global';
     return 'El modelo predice ${result.label.displayName} con ${_percent(result.confidence)} de confianza. Las senales locales mas relevantes son $top; estas $direction. Cuando Ollama este conectado, esta base se convertira en una explicacion natural y trazable.';
   }
 }

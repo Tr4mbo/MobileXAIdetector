@@ -59,6 +59,11 @@ class ScanTarget {
     this.path,
     this.packageName,
     this.source = ScanSource.apkFile,
+    this.observedRiskScore,
+    this.appCount,
+    this.systemAppCount,
+    this.sensitivePermissionCount,
+    this.highRiskAppCount,
   });
 
   final String name;
@@ -66,6 +71,11 @@ class ScanTarget {
   final String? path;
   final String? packageName;
   final ScanSource source;
+  final double? observedRiskScore;
+  final int? appCount;
+  final int? systemAppCount;
+  final int? sensitivePermissionCount;
+  final int? highRiskAppCount;
 
   String get sourceLabel => switch (source) {
     ScanSource.apkFile => 'APK externo',
@@ -97,6 +107,7 @@ class InstalledAndroidApp {
     required this.firstInstallTime,
     required this.lastUpdateTime,
     required this.requestedPermissions,
+    required this.isSystemApp,
     this.sourceDir,
   });
 
@@ -107,6 +118,7 @@ class InstalledAndroidApp {
   final int firstInstallTime;
   final int lastUpdateTime;
   final List<String> requestedPermissions;
+  final bool isSystemApp;
   final String? sourceDir;
 
   factory InstalledAndroidApp.fromMap(Map<dynamic, dynamic> map) {
@@ -121,6 +133,7 @@ class InstalledAndroidApp {
           (map['requestedPermissions'] as List<dynamic>? ?? const [])
               .map((value) => value.toString())
               .toList(growable: false),
+      isSystemApp: map['isSystemApp'] as bool? ?? false,
       sourceDir: map['sourceDir'] as String?,
     );
   }
