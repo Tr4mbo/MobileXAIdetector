@@ -27,7 +27,12 @@ class MainActivity : FlutterActivity() {
 
         methodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
-                "listInstalledApps" -> result.success(listInstalledApps())
+                "listInstalledApps" -> {
+                    Thread {
+                        val apps = listInstalledApps()
+                        runOnUiThread { result.success(apps) }
+                    }.start()
+                }
                 "getInitialExternalApk" -> result.success(pendingExternalApk)
                 "openUsageAccessSettings" -> {
                     startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
@@ -74,7 +79,7 @@ class MainActivity : FlutterActivity() {
 
         return packages
             .filter { it.packageName != packageName }
-            .map { packageInfo -> packageInfo.toFlutterMap(packageManager) }
+            .map { packageInfo -> packageInfo.toFlutterMap() }
             .sortedBy { (it["label"] as String).lowercase() }
     }
 
@@ -125,9 +130,8 @@ class MainActivity : FlutterActivity() {
     }
 }
 
-private fun PackageInfo.toFlutterMap(packageManager: PackageManager): Map<String, Any?> {
+private fun PackageInfo.toFlutterMap(): Map<String, Any?> {
     val appInfo = applicationInfo
-    val label = appInfo?.loadLabel(packageManager)?.toString() ?: packageName
     val flags = appInfo?.flags ?: 0
     val isSystemApp = (flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
         (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
@@ -140,7 +144,7 @@ private fun PackageInfo.toFlutterMap(packageManager: PackageManager): Map<String
 
     return mapOf(
         "packageName" to packageName,
-        "label" to label,
+        "label" to packageName,
         "versionName" to (versionName ?: "unknown"),
         "versionCode" to versionCodeValue,
         "firstInstallTime" to firstInstallTime,

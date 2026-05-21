@@ -17,7 +17,7 @@ class PrototypeDetectionEngine implements DetectionEngine {
     required ScanTarget target,
     required ModelMetadata metadata,
   }) async {
-    await Future<void>.delayed(const Duration(milliseconds: 1800));
+    await Future<void>.delayed(const Duration(milliseconds: 650));
 
     final score = _prototypeRiskScore(target);
     final label = score >= 0.5 ? DetectionLabel.malware : DetectionLabel.benign;

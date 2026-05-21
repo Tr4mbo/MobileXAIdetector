@@ -426,63 +426,69 @@ class _DetectorShell extends StatelessWidget {
 
         return Stack(
           children: [
-            Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: maxWidth),
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      AppHeader(onShieldTap: onShieldTap),
-                      const SizedBox(height: 20),
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 220),
-                        child: switch (section) {
-                          AppSection.scanner => ScannerHomeScreen(
-                            key: const ValueKey('scanner'),
-                            metadata: metadata,
-                            target: globalTarget,
-                            result: globalResult,
-                            error: error,
-                            isScanning: isScanning,
-                            onAnalyze: onAnalyze,
-                          ),
-                          AppSection.decision => DecisionInfoScreen(
-                            key: const ValueKey('decision'),
-                            result: globalResult,
-                          ),
-                          AppSection.data => DataInfoScreen(
-                            key: const ValueKey('data'),
-                            metadata: metadata,
-                            target: globalTarget,
-                            result: globalResult,
-                            installedApps: installedApps,
-                          ),
-                          AppSection.xai => XaiInfoScreen(
-                            key: const ValueKey('xai'),
-                            result: globalResult,
-                            isScanning: isScanning,
-                          ),
-                          AppSection.services => ServicesInfoScreen(
-                            key: const ValueKey('services'),
-                            installedApps: installedApps,
-                            onOpenUsageAccess: onOpenUsageAccess,
-                          ),
-                        },
-                      ),
-                    ],
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 240),
+              curve: Curves.easeOutCubic,
+              transform: Matrix4.translationValues(navOpen ? 34.0 : 0.0, 0, 0),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxWidth),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        AppHeader(onShieldTap: onShieldTap),
+                        const SizedBox(height: 20),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 220),
+                          child: switch (section) {
+                            AppSection.scanner => ScannerHomeScreen(
+                              key: const ValueKey('scanner'),
+                              metadata: metadata,
+                              target: globalTarget,
+                              result: globalResult,
+                              error: error,
+                              isScanning: isScanning,
+                              onAnalyze: onAnalyze,
+                            ),
+                            AppSection.decision => DecisionInfoScreen(
+                              key: const ValueKey('decision'),
+                              result: globalResult,
+                            ),
+                            AppSection.data => DataInfoScreen(
+                              key: const ValueKey('data'),
+                              metadata: metadata,
+                              target: globalTarget,
+                              result: globalResult,
+                              installedApps: installedApps,
+                            ),
+                            AppSection.xai => XaiInfoScreen(
+                              key: const ValueKey('xai'),
+                              result: globalResult,
+                              isScanning: isScanning,
+                            ),
+                            AppSection.services => ServicesInfoScreen(
+                              key: const ValueKey('services'),
+                              installedApps: installedApps,
+                              onOpenUsageAccess: onOpenUsageAccess,
+                            ),
+                          },
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
             if (navOpen)
               Positioned.fill(
+                left: 112,
                 child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
                   onTap: () => onSelectSection(section),
-                  child: ColoredBox(
-                    color: Colors.black.withValues(alpha: 0.38),
-                  ),
+                  child: const SizedBox.expand(),
                 ),
               ),
             AnimatedPositioned(
@@ -1514,8 +1520,8 @@ class _ScannerGaugePainter extends CustomPainter {
       pulse,
     );
 
-    for (var i = 0; i < 48; i++) {
-      final angle = -math.pi / 2 + (math.pi * 2 * i / 48);
+    for (var i = 0; i < 32; i++) {
+      final angle = -math.pi / 2 + (math.pi * 2 * i / 32);
       final inner = Offset(
         center.dx + math.cos(angle) * (radius - 28),
         center.dy + math.sin(angle) * (radius - 28),
@@ -1740,7 +1746,7 @@ class FuturisticBackground extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [AppColors.voidBlack, Color(0xFF08161B), Color(0xFF101317)],
+          colors: [AppColors.voidBlack, Color(0xFF071015), Color(0xFF0B1115)],
         ),
       ),
       child: CustomPaint(painter: _GridPainter()),
@@ -1754,13 +1760,13 @@ class _GridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final linePaint = Paint()
-      ..color = AppColors.cyan.withValues(alpha: 0.06)
+      ..color = AppColors.cyan.withValues(alpha: 0.022)
       ..strokeWidth = 1;
     final strongPaint = Paint()
-      ..color = AppColors.lime.withValues(alpha: 0.08)
+      ..color = AppColors.lime.withValues(alpha: 0.032)
       ..strokeWidth = 1.2;
 
-    const spacing = 42.0;
+    const spacing = 86.0;
     for (var x = 0.0; x < size.width; x += spacing) {
       canvas.drawLine(Offset(x, 0), Offset(x, size.height), linePaint);
     }
