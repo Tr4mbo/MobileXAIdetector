@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local LLM weights are too large for normal Git/GitHub pushes.
+*.gguf

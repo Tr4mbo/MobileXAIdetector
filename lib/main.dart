@@ -7,6 +7,7 @@ import 'models/detector_models.dart';
 import 'services/android_app_scanner_service.dart';
 import 'services/detector_service.dart';
 import 'services/model_asset_repository.dart';
+import 'services/ollama_service.dart';
 
 void main() {
   runApp(const MobileXAIDetectorApp());
@@ -722,7 +723,11 @@ class ScannerHomeScreen extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
-        XaiGenerationPanel(result: result, isScanning: isScanning),
+        XaiGenerationPanel(
+          result: result,
+          isScanning: isScanning,
+          enableReportGeneration: true,
+        ),
       ],
     );
   }
@@ -997,13 +1002,13 @@ class XaiInfoScreen extends StatelessWidget {
       title: 'Chat XAI',
       icon: Icons.psychology_alt_rounded,
       children: [
-        XaiGenerationPanel(result: result, isScanning: isScanning),
+        CyberChatPanel(result: result, isScanning: isScanning),
         const SizedBox(height: 14),
         const _InfoBlock(
           icon: Icons.chat_rounded,
           title: 'Rol del chat',
           text:
-              'El chat recibe la decision, probabilidades y factores locales. Su salida debe ser explicativa y trazable, sin sustituir al modelo ML.',
+              'Este modo usa mxai-cyber-chat para responder solo preguntas defensivas de ciberseguridad relacionadas con MXAI. El reporte del analisis global queda en Inicio.',
         ),
       ],
     );
@@ -1030,13 +1035,13 @@ class ServicesInfoScreen extends StatelessWidget {
           icon: Icons.install_mobile_rounded,
           title: 'Activacion fuera de la app',
           text:
-              'El SDK registra MXAI como receptor de archivos APK externos. Cuando Android abre o comparte un APK con MXAI, se lanza una ventana de analisis externa con explicabilidad.',
+              'El SDK no reemplaza la descarga ni el instalador. Primero descarga el APK y despues compartelo con MXAI para abrir la ventana externa de analisis con explicabilidad.',
         ),
         const SizedBox(height: 14),
         _DataRow(label: 'Apps cacheadas', value: '${installedApps.length}'),
         const _DataRow(label: 'Permiso', value: 'QUERY_ALL_PACKAGES'),
         const _DataRow(label: 'Servicio', value: 'AppAnalysisService'),
-        const _DataRow(label: 'Intent', value: 'VIEW/SEND APK'),
+        const _DataRow(label: 'Intent', value: 'SEND APK post-descarga'),
         const SizedBox(height: 16),
         SizedBox(
           width: double.infinity,
@@ -1208,15 +1213,70 @@ class SectionScaffold extends StatelessWidget {
   }
 }
 
-class XaiGenerationPanel extends StatelessWidget {
+class XaiGenerationPanel extends StatefulWidget {
   const XaiGenerationPanel({
     super.key,
     required this.result,
     required this.isScanning,
+    this.enableReportGeneration = false,
   });
 
   final ScanResult? result;
   final bool isScanning;
+  final bool enableReportGeneration;
+
+  @override
+  State<XaiGenerationPanel> createState() => _XaiGenerationPanelState();
+}
+
+class _XaiGenerationPanelState extends State<XaiGenerationPanel> {
+  final _ollama = const OllamaService();
+
+  bool _isGenerating = false;
+  String? _ollamaText;
+  String? _ollamaError;
+
+  @override
+  void didUpdateWidget(covariant XaiGenerationPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.result != widget.result) {
+      _ollamaText = null;
+      _ollamaError = null;
+    }
+  }
+
+  Future<void> _generateReport() async {
+    final result = widget.result;
+    if (result == null || _isGenerating) {
+      return;
+    }
+
+    setState(() {
+      _isGenerating = true;
+      _ollamaError = null;
+    });
+
+    try {
+      final text = await _ollama.generateAnalysisReport(result);
+      if (!mounted) return;
+      setState(() {
+        _ollamaText = text.isEmpty ? null : text;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _ollamaError = error is OllamaException
+            ? error.toString()
+            : _ollamaConnectionMessage(_ollama.baseUrl);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGenerating = false;
+        });
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1235,7 +1295,9 @@ class XaiGenerationPanel extends StatelessWidget {
                 ),
               ),
               Text(
-                result == null ? 'Ollama' : result!.label.displayName,
+                widget.result == null
+                    ? 'Ollama'
+                    : widget.result!.label.displayName,
                 style: Theme.of(
                   context,
                 ).textTheme.labelLarge?.copyWith(color: AppColors.cyan),
@@ -1253,11 +1315,11 @@ class XaiGenerationPanel extends StatelessWidget {
   }
 
   Widget _buildBody(BuildContext context) {
-    if (isScanning) {
+    if (widget.isScanning || _isGenerating) {
       return const _GeneratingText(key: ValueKey('generating'));
     }
 
-    final current = result;
+    final current = widget.result;
     if (current == null) {
       return Text(
         'La explicacion aparecera aqui despues de la decision del modelo. El LLM no clasifica; solo traduce probabilidades y factores locales a texto.',
@@ -1265,6 +1327,16 @@ class XaiGenerationPanel extends StatelessWidget {
         style: Theme.of(
           context,
         ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+      );
+    }
+
+    if (widget.enableReportGeneration) {
+      return _ReportMode(
+        key: const ValueKey('report-mode'),
+        fallback: _xaiText(current),
+        ollamaText: _ollamaText,
+        error: _ollamaError,
+        onGenerate: _generateReport,
       );
     }
 
@@ -1284,6 +1356,219 @@ class XaiGenerationPanel extends StatelessWidget {
         ? 'muestran concentracion suficiente para elevar el riesgo'
         : 'no muestran concentracion suficiente para elevar el riesgo global';
     return 'El modelo predice ${result.label.displayName} con ${_percent(result.confidence)} de confianza. Las senales locales mas relevantes son $top; estas $direction. Cuando Ollama este conectado, esta base se convertira en una explicacion natural y trazable.';
+  }
+}
+
+class CyberChatPanel extends StatefulWidget {
+  const CyberChatPanel({
+    super.key,
+    required this.result,
+    required this.isScanning,
+  });
+
+  final ScanResult? result;
+  final bool isScanning;
+
+  @override
+  State<CyberChatPanel> createState() => _CyberChatPanelState();
+}
+
+class _CyberChatPanelState extends State<CyberChatPanel> {
+  final _ollama = const OllamaService();
+  final _questionController = TextEditingController();
+
+  bool _isGenerating = false;
+  String? _response;
+  String? _error;
+
+  @override
+  void dispose() {
+    _questionController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _askChat() async {
+    final question = _questionController.text.trim();
+    if (question.isEmpty || _isGenerating) {
+      return;
+    }
+
+    setState(() {
+      _isGenerating = true;
+      _error = null;
+    });
+
+    try {
+      final text = await _ollama.askCyberChat(
+        question: question,
+        result: widget.result,
+      );
+      if (!mounted) return;
+      setState(() {
+        _response = text.isEmpty ? null : text;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error is OllamaException
+            ? error.toString()
+            : _ollamaConnectionMessage(_ollama.baseUrl);
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGenerating = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.chat_rounded, color: AppColors.cyan),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Chatbot XAI',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              Text(
+                'mxai-cyber-chat',
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(color: AppColors.cyan),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: widget.isScanning || _isGenerating
+                ? const _GeneratingText(key: ValueKey('chat-generating'))
+                : _ChatMode(
+                    key: const ValueKey('chat-mode'),
+                    controller: _questionController,
+                    response: _response,
+                    error: _error,
+                    onAsk: _askChat,
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReportMode extends StatelessWidget {
+  const _ReportMode({
+    super.key,
+    required this.fallback,
+    required this.ollamaText,
+    required this.error,
+    required this.onGenerate,
+  });
+
+  final String fallback;
+  final String? ollamaText;
+  final String? error;
+  final VoidCallback onGenerate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          ollamaText ?? fallback,
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        if (error != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            error!,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.danger),
+          ),
+        ],
+        const SizedBox(height: 14),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: onGenerate,
+            icon: const Icon(Icons.description_rounded),
+            label: const Text('Generar reporte Ollama'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ChatMode extends StatelessWidget {
+  const _ChatMode({
+    super.key,
+    required this.controller,
+    required this.response,
+    required this.error,
+    required this.onAsk,
+  });
+
+  final TextEditingController controller;
+  final String? response;
+  final String? error;
+  final VoidCallback onAsk;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          controller: controller,
+          minLines: 1,
+          maxLines: 3,
+          textInputAction: TextInputAction.send,
+          onSubmitted: (_) => onAsk(),
+          decoration: InputDecoration(
+            hintText: 'Pregunta sobre ciberseguridad o MXAI',
+            prefixIcon: const Icon(Icons.chat_rounded),
+            suffixIcon: IconButton(
+              tooltip: 'Enviar',
+              onPressed: onAsk,
+              icon: const Icon(Icons.send_rounded),
+            ),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (response == null && error == null)
+          Text(
+            'Este chatbot esta limitado a ciberseguridad defensiva y preguntas sobre MXAI Detector.',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+          )
+        else if (response != null)
+          Text(response!, style: Theme.of(context).textTheme.bodyMedium),
+        if (error != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            error!,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.danger),
+          ),
+        ],
+      ],
+    );
   }
 }
 
@@ -1812,3 +2097,7 @@ class AppColors {
 }
 
 String _percent(double value) => '${(value * 100).toStringAsFixed(1)}%';
+
+String _ollamaConnectionMessage(String baseUrl) {
+  return 'No pude conectar con Ollama en $baseUrl. En telefono fisico 127.0.0.1 apunta al telefono; instala con scripts\\install_to_phone.ps1 -OllamaBaseUrl "http://IP_DE_TU_PC:11434" y verifica que Ollama este escuchando en la red local.';
+}
